@@ -1697,6 +1697,13 @@ impl Shadow {
         list.defer_refresh(self, address as usize, len as usize);
     }
 
+    /// A copy of `len` bytes of `buffer` (at `data`, `gpu`), for tests in
+    /// other modules.
+    #[cfg(test)]
+    pub(crate) fn for_test(buffer: ID3D12Resource, data: *mut u8, gpu: u64, len: u64) -> Shadow {
+        Shadow::new(buffer, data, gpu, data as u64, len)
+    }
+
     fn new(buffer: ID3D12Resource, data: *mut u8, gpu: u64, start: u64, len: u64) -> Shadow {
         let pages = (start + len).div_ceil(PAGE as u64) - start / PAGE as u64;
         LIVE[0].fetch_add(1, Ordering::Relaxed);

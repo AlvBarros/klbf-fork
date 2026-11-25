@@ -726,6 +726,46 @@ fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 mod tests {
     use super::{BUFFER_READ, BUFFER_WRITE, BufferStates};
 
+    /// A range declared written again is kept once until a title copy or
+    /// title work, and a submission groups the ranges per copy, each once,
+    /// in the order first declared (Belobug #29).
+    #[test]
+    fn gpu_writes_are_declared_once_until_title_memory_changes() {
+        use std::sync::Arc;
+        use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
+        let Some(host) = super::host() else { return };
+        let Ok(list) = host.new_list() else { return };
+        let shadow = |host: &super::Host| {
+            let (buffer, data): (ID3D12Resource, *mut u8) = host.shared_buffer(64 << 10)?;
+            // SAFETY: a live buffer.
+            let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+            Some(Arc::new(crate::shadow::Shadow::for_test(buffer, data, gpu, 64 << 10)))
+        };
+        let (Some(a), Some(b)) = (shadow(host), shadow(host)) else { return };
+        let writes = |list: &super::HostList| {
+            list.deferred().copies.iter().filter(|s| matches!(s, super::Step::GpuWrite(..))).count()
+        };
+        list.defer_gpu_write(&a, 0, 256);
+        list.defer_gpu_write(&b, 512, 64);
+        list.defer_gpu_write(&a, 0, 256);
+        list.defer_gpu_write(&a, 1024, 16);
+        assert_eq!(writes(&list), 3, "a repeated range is declared once");
+        let grouped = super::declared_writes(&[&list, &list]);
+        assert_eq!(grouped.len(), 2);
+        assert!(Arc::ptr_eq(&grouped[0].0, &a) && Arc::ptr_eq(&grouped[1].0, &b));
+        assert_eq!(grouped[0].1, vec![(0, 256), (1024, 1040)]);
+        assert_eq!(grouped[1].1, vec![(512, 576)]);
+        // A title copy: the same range is declared again after it.
+        let (mut x, y) = ([0u8; 4], [1u8; 4]);
+        list.defer_copy(x.as_mut_ptr(), y.as_ptr(), 4);
+        list.defer_gpu_write(&a, 0, 256);
+        assert_eq!(writes(&list), 4, "declared again after a title copy");
+        list.defer(|| {});
+        list.defer_gpu_write(&a, 0, 256);
+        assert_eq!(writes(&list), 5, "declared again after title work");
+        assert_eq!(super::declared_writes(&[&list])[0].1, vec![(0, 256), (1024, 1040)]);
+    }
+
     #[test]
     fn buffer_states_transition_between_writes_and_reads() {
         let mut s = BufferStates::default();
@@ -1872,6 +1912,10 @@ struct Deferred {
     /// Buffer ranges refreshed since the last title copy (host copy,
     /// address, bytes): refreshing them again would find the same bytes.
     refreshed: std::collections::HashSet<(usize, usize, usize)>,
+    /// Buffer ranges declared written by shaders since the last title copy
+    /// (host copy, address, bytes): declaring them again would change
+    /// nothing (Belobug/VIctory-Belobug-AMD #29).
+    gpu_written: std::collections::HashSet<(usize, usize, usize)>,
     /// Textures whose contents the list brings up to date.
     textures: std::collections::HashSet<usize>,
     /// Bottom-of-pipe writes, done once the list has run: address, what,
@@ -2900,18 +2944,33 @@ fn continues(last: (usize, usize, usize), next: (usize, usize, usize)) -> bool {
 /// The ranges the shaders of `runs` may write, per host copy, as declared.
 /// One list's lock at a time: a submission may name a list twice.
 fn declared_writes(runs: &[&HostList]) -> Vec<Declared> {
+    group_writes(runs, |_| true)
+}
+
+/// The distinct ranges the shaders of `runs` declared written, per host
+/// copy that `keep` takes, in the order first declared. Hashed: a frame
+/// declares thousands of ranges, and finding each among those before was a
+/// linear search (Belobug/VIctory-Belobug-AMD #29).
+fn group_writes(runs: &[&HostList], keep: impl Fn(&crate::shadow::Shadow) -> bool) -> Vec<Declared> {
     let mut back: Vec<Declared> = Vec::new();
+    let mut at: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashSet<(usize, usize, usize)> = std::collections::HashSet::new();
     for list in runs {
         for step in &list.deferred().copies {
-            if let Step::GpuWrite(shadow, address, len) = step {
+            if let Step::GpuWrite(shadow, address, len) = step
+                && keep(shadow)
+            {
+                let key = std::sync::Arc::as_ptr(shadow) as usize;
                 let range = (*address, *address + *len);
-                match back.iter_mut().find(|(s, _)| std::sync::Arc::ptr_eq(s, shadow)) {
-                    Some((_, ranges)) => {
-                        if !ranges.contains(&range) {
-                            ranges.push(range);
-                        }
+                if !seen.insert((key, range.0, range.1)) {
+                    continue;
+                }
+                match at.get(&key) {
+                    Some(&i) => back[i].1.push(range),
+                    None => {
+                        at.insert(key, back.len());
+                        back.push((shadow.clone(), vec![range]));
                     }
-                    None => back.push((shadow.clone(), vec![range])),
                 }
             }
         }
@@ -3261,24 +3320,8 @@ impl Host {
             return None;
         }
         // The ranges this submission's shaders may write, per copy.
-        let mut declared: Vec<(Arc<crate::shadow::Shadow>, Vec<(usize, usize)>)> = Vec::new();
-        for list in runs {
-            for step in &list.deferred().copies {
-                if let Step::GpuWrite(shadow, address, len) = step
-                    && shadow.carded()
-                {
-                    let range = (*address, *address + *len);
-                    match declared.iter_mut().find(|(s, _)| Arc::ptr_eq(s, shadow)) {
-                        Some((_, ranges)) => {
-                            if !ranges.contains(&range) {
-                                ranges.push(range);
-                            }
-                        }
-                        None => declared.push((shadow.clone(), vec![range])),
-                    }
-                }
-            }
-        }
+        let declared: Vec<(Arc<crate::shadow::Shadow>, Vec<(usize, usize)>)> =
+            group_writes(runs, |s| s.carded());
         // With the relay: the order of the queue is held from here until
         // what is taken is on the queue, and the taking is numbered.
         let mut order = relay().then(|| QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner()));
@@ -5252,6 +5295,7 @@ impl HostList {
             .copies
             .push(Step::Copy(dst as usize, src as usize, len));
         deferred.refreshed.clear();
+        deferred.gpu_written.clear();
     }
 
     /// Copies `len` bytes of title memory at `src` into the list's upload
@@ -5288,9 +5332,16 @@ impl HostList {
         address: usize,
         len: usize,
     ) {
-        self.deferred()
-            .copies
-            .push(Step::GpuWrite(shadow.clone(), address, len));
+        // Once until a title copy or title work (Belobug #29): a range a
+        // dispatch after dispatch declares again changes nothing, and each
+        // step costs a flush and a snapshot at submission.
+        let mut deferred = self.deferred();
+        let key = (std::sync::Arc::as_ptr(shadow) as usize, address, len);
+        if deferred.gpu_written.insert(key) {
+            deferred
+                .copies
+                .push(Step::GpuWrite(shadow.clone(), address, len));
+        }
     }
 
     /// A read back: once the list has run, `rows` rows of `row` bytes go
@@ -5434,8 +5485,10 @@ impl HostList {
     /// Runs `work` when the list is submitted, in order with its copies.
     /// `work` may write title memory (refreshes after it copy again).
     pub(crate) fn defer(&self, work: impl Fn() + Send + 'static) {
-        self.deferred().copies.push(Step::Run(Box::new(work)));
-        self.deferred().refreshed.clear();
+        let mut deferred = self.deferred();
+        deferred.copies.push(Step::Run(Box::new(work)));
+        deferred.refreshed.clear();
+        deferred.gpu_written.clear();
     }
 
     /// As [`HostList::defer`], for work that writes only host memory.
