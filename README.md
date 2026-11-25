@@ -37,6 +37,10 @@ What vkd3d-proton reports on this card: shader model 6.6–6.8, mesh shaders, DX
 | Test suite under Proton (`scripts/linux/test.sh`) | ✅ 534 of 541 | the 7 left: 3 need `dxil.dll`; 2 start `cargo`/`git` inside Wine; vkd3d-proton accepts unsigned DXIL; Wine's `ws2_32` lacks `WSAConnectByList` |
 | In game | ⏳ not run yet | results will go here |
 
+Taken from other forks:
+
+- **Constant ambient light** (from [Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)): the game's ray-traced indirect light does not run, which leaves shadowed areas black and foliage magenta. Right after the pass that should resolve it, its output is replaced by a constant, darkened in creases from the depth buffer. `VICTORY_AMBIENT=<level>` (0.6 by default; Belobug found ~0.07 bluish right at night, ~0.3 warm at dusk), `VICTORY_AMBIENT_TINT=r,g,b`, `VICTORY_AMBIENT_SHADE=strength,radius`, `VICTORY_AMBIENT=off` for the game's own output. Builds and runs on the GPU in the tests; not yet seen in game.
+
 What differs from KLBF Lab on this setup:
 
 - **The AMD shader skip is off.** KLBF Lab skips shader `39f0e9aeb156a61c` because AMD's compiler never finishes it; the Linux launcher sets `VICTORY_SKIP_PIPELINES` empty unless you set it yourself, so nothing is skipped on NVIDIA.
