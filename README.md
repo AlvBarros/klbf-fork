@@ -40,6 +40,7 @@ What vkd3d-proton reports on this card: shader model 6.6–6.8, mesh shaders, DX
 Taken from other forks:
 
 - **Constant ambient light** (from [Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)): the game's ray-traced indirect light does not run, which leaves shadowed areas black and foliage magenta. Right after the pass that should resolve it, its output is replaced by a constant, darkened in creases from the depth buffer. `VICTORY_AMBIENT=<level>` (0.6 by default; Belobug found ~0.07 bluish right at night, ~0.3 warm at dusk), `VICTORY_AMBIENT_TINT=r,g,b`, `VICTORY_AMBIENT_SHADE=strength,radius`, `VICTORY_AMBIENT=off` for the game's own output. Builds and runs on the GPU in the tests; not yet seen in game.
+- **No blending on integer render targets** (pgm1207 and Arvi23, Belobug's PR #45): the game leaves blending on for an `R8_UINT` world target; vkd3d-proton refuses that pipeline ("using integer format is not supported") and its draws were lost. A test on the GPU checks the refusal and that the fixed state is accepted.
 
 What differs from KLBF Lab on this setup:
 
