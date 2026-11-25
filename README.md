@@ -34,7 +34,7 @@ What vkd3d-proton reports on this card: shader model 6.6–6.8, mesh shaders, DX
 | Starts under Proton, Direct3D 12 device created | ✅ | `scripts/linux/run.sh check` |
 | Wine/vkd3d-proton pipeline library (shader cache kept between runs) | ✅ | from KLBF Lab (gmankab, upstream VIctory#347) |
 | Runtime compute shaders (indirect clamp, card compare, FFX) | ✅ with Microsoft's `d3dcompiler_47.dll` | Wine's own compiler rejects them, and without the clamp every indirect draw is dropped; the scripts install Microsoft's DLL into the prefix (see below) |
-| Test suite under Proton (`scripts/linux/test.sh`) | ✅ 534 of 541 | the 7 left: 3 need `dxil.dll`; 2 start `cargo`/`git` inside Wine; vkd3d-proton accepts unsigned DXIL; Wine's `ws2_32` lacks `WSAConnectByList` |
+| Test suite under Proton (`scripts/linux/test.sh`) | ✅ 543 of 550 | the 7 left: 3 need `dxil.dll`; 2 start `cargo`/`git` inside Wine; vkd3d-proton accepts unsigned DXIL; Wine's `ws2_32` lacks `WSAConnectByList` |
 | In game | ⏳ not run yet | results will go here |
 
 Taken from other forks:
@@ -42,6 +42,7 @@ Taken from other forks:
 - **Constant ambient light** (from [Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)): the game's ray-traced indirect light does not run, which leaves shadowed areas black and foliage magenta. Right after the pass that should resolve it, its output is replaced by a constant, darkened in creases from the depth buffer. `VICTORY_AMBIENT=<level>` (0.6 by default; Belobug found ~0.07 bluish right at night, ~0.3 warm at dusk), `VICTORY_AMBIENT_TINT=r,g,b`, `VICTORY_AMBIENT_SHADE=strength,radius`, `VICTORY_AMBIENT=off` for the game's own output. Builds and runs on the GPU in the tests; not yet seen in game.
 - **No blending on integer render targets** (pgm1207 and Arvi23, Belobug's PR #45): the game leaves blending on for an `R8_UINT` world target; vkd3d-proton refuses that pipeline ("using integer format is not supported") and its draws were lost. A test on the GPU checks the refusal and that the fixed state is accepted.
 - **Helper lanes in pixel shaders** (Belobug f520772 / upstream VIctory 0601955, Belobug 03629f3, test from VIctory-dexnom 921d8d3): a helper lane's `v_readfirstlane` takes its own value, so the console's first-lane loops cannot spin to their limit at triangle edges; quad permutations in pixel shaders read through quad reads, which reach helper lanes. On this card the quad-read test passes with or without the second fix (the line artifacts it cures were seen on AMD); both are kept as spec-correct. The `IsHelperLane` the first one emits is checked to build and draw through vkd3d-proton.
+- **Less CPU work per frame** (Belobug: ff920f2 and romainhedouin's PRs #24, #25, #29, #30): the views table is a read-write lock, so the game's recording threads stop taking turns; shader-written ranges are declared once until game memory changes and grouped by hash at submission; a misaligned root constant buffer is copied once per list, not per draw; a pipeline bound again is not kept again; buffer-to-texture staging comes from the list's scratch chunks instead of a new upload buffer per copy. Belobug reports its frame is CPU-bound; frame-time effect here is unmeasured until the game runs. Each comes with a test (543 pass under Proton).
 
 What differs from KLBF Lab on this setup:
 
