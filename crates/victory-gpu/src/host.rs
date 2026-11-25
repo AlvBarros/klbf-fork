@@ -766,6 +766,31 @@ mod tests {
         assert_eq!(super::declared_writes(&[&list])[0].1, vec![(0, 256), (1024, 1040)]);
     }
 
+    /// The same title bytes asked for again are the same upload memory, one
+    /// fill, until a title copy or title work (Belobug #24).
+    #[test]
+    fn a_fill_is_shared_until_title_memory_changes() {
+        let Some(host) = super::host() else { return };
+        let Ok(list) = host.new_list() else { return };
+        let fills = |list: &super::HostList| {
+            list.deferred().copies.iter().filter(|s| matches!(s, super::Step::Fill(..))).count()
+        };
+        let title = vec![7u8; 4096];
+        let first = list.fill_scratch(title.as_ptr(), 300).expect("list scratch");
+        assert_eq!(list.fill_scratch(title.as_ptr(), 300), Some(first));
+        assert_eq!(fills(&list), 1, "one fill for two asks");
+        let other = list.fill_scratch(title[512..].as_ptr(), 300).unwrap();
+        assert_ne!(other, first);
+        assert_eq!(fills(&list), 2);
+        let (mut x, y) = ([0u8; 4], [1u8; 4]);
+        list.defer_copy(x.as_mut_ptr(), y.as_ptr(), 4);
+        assert_ne!(list.fill_scratch(title.as_ptr(), 300), Some(first), "filled again after a title copy");
+        assert_eq!(fills(&list), 3);
+        list.defer(|| {});
+        list.fill_scratch(title.as_ptr(), 300).unwrap();
+        assert_eq!(fills(&list), 4, "filled again after title work");
+    }
+
     #[test]
     fn buffer_states_transition_between_writes_and_reads() {
         let mut s = BufferStates::default();
@@ -1916,6 +1941,12 @@ struct Deferred {
     /// (host copy, address, bytes): declaring them again would change
     /// nothing (Belobug/VIctory-Belobug-AMD #29).
     gpu_written: std::collections::HashSet<(usize, usize, usize)>,
+    /// Upload memory filled from title memory since the last title copy
+    /// (source, bytes): its host GPU address, which a second fill would find
+    /// holding the same bytes (Belobug #24).
+    filled: std::collections::HashMap<(usize, usize), u64>,
+    /// The host pipelines `bind_pipeline` kept, by address (Belobug #25).
+    bound: std::collections::HashSet<usize>,
     /// Textures whose contents the list brings up to date.
     textures: std::collections::HashSet<usize>,
     /// Bottom-of-pipe writes, done once the list has run: address, what,
@@ -5263,12 +5294,43 @@ impl HostList {
             && self.twins.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
     }
 
-    /// Notes a pipeline the list binds.
-    pub(crate) fn used_pipeline(&self, name: &str) {
-        let mut pipelines = self.pipelines.lock().unwrap_or_else(|e| e.into_inner());
-        if !pipelines.contains(name) {
-            pipelines.insert(name.to_owned());
+    /// Notes a pipeline the list binds and keeps it and its root signature
+    /// until the list is reset (the title may release them before it
+    /// submits), the first time only: the list keeps the first, so its
+    /// address names the same pipeline from then on. One lookup instead of
+    /// two QueryInterface calls, three locks and a name search per switch
+    /// (Belobug/VIctory-Belobug-AMD #25).
+    pub(crate) fn bind_pipeline(&self, p: &crate::pipeline::host::HostPipeline) {
+        let mut deferred = self.deferred();
+        if !deferred.bound.insert(p.pso.as_raw() as usize) {
+            return;
         }
+        if let Ok(pso) = p.pso.cast::<windows::core::IUnknown>() {
+            deferred.kept.push(pso);
+        }
+        if let Ok(root) = p.root.cast::<windows::core::IUnknown>() {
+            deferred.kept.push(root);
+        }
+        drop(deferred);
+        let mut pipelines = self.pipelines.lock().unwrap_or_else(|e| e.into_inner());
+        if !pipelines.contains(&p.name) {
+            pipelines.insert(p.name.clone());
+        }
+    }
+
+    /// The host GPU address of `len` bytes of upload memory holding the
+    /// title memory at `src` as of the list's submission: one copy for every
+    /// ask until a title copy or title work intervenes (Belobug #24: a root
+    /// constant buffer not 256-byte aligned, bound by draw after draw).
+    pub(crate) fn fill_scratch(&self, src: *const u8, len: u64) -> Option<u64> {
+        let key = (src as usize, len as usize);
+        if let Some(&gpu) = self.deferred().filled.get(&key) {
+            return Some(gpu);
+        }
+        let (gpu, to) = self.scratch(len)?;
+        self.defer_fill(to, src, len as usize);
+        self.deferred().filled.insert(key, gpu);
+        Some(gpu)
     }
 
     fn deferred(&self) -> std::sync::MutexGuard<'_, Deferred> {
@@ -5296,6 +5358,7 @@ impl HostList {
             .push(Step::Copy(dst as usize, src as usize, len));
         deferred.refreshed.clear();
         deferred.gpu_written.clear();
+        deferred.filled.clear();
     }
 
     /// Copies `len` bytes of title memory at `src` into the list's upload
@@ -5489,6 +5552,7 @@ impl HostList {
         deferred.copies.push(Step::Run(Box::new(work)));
         deferred.refreshed.clear();
         deferred.gpu_written.clear();
+        deferred.filled.clear();
     }
 
     /// As [`HostList::defer`], for work that writes only host memory.
