@@ -9,10 +9,10 @@
 #   PROTON_DIR   Proton install (default: Steam's "Proton 11.0")
 #   KLBF_HOME    prefix, cache, saves and logs (default: ~/.local/share/klbf-fork)
 #   VICTORY_*    passed through to victory.exe (see README.md)
+#   KLBF_D3DCOMPILER  Microsoft's d3dcompiler_47.dll, if not found (see env.sh)
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-KLBF_HOME="${KLBF_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/klbf-fork}"
-PROTON_DIR="${PROTON_DIR:-$HOME/.steam/steam/steamapps/common/Proton 11.0}"
+. "$ROOT/scripts/linux/env.sh"
 EXE="${KLBF_EXE:-$ROOT/target/x86_64-pc-windows-msvc/release/victory.exe}"
 
 [ -x "$PROTON_DIR/proton" ] || { echo "no Proton at $PROTON_DIR (set PROTON_DIR)" >&2; exit 1; }
@@ -30,17 +30,16 @@ if [ ! -d "$KLBF_HOME/prefix/pfx" ]; then
         "$PROTON_DIR/proton" run "$EXE" config >/dev/null 2>&1 || true
 fi
 
-export WINEPREFIX="$KLBF_HOME/prefix/pfx"
-export WINEDEBUG="${WINEDEBUG:--all}"
-# Proton's wine run directly does not apply these by itself; without them
-# Wine's built-in d3d12 is used and device creation fails ("Invalid parameter").
-export WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11=n,b${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
+# Proton's wine run directly does not apply the d3d12/dxgi overrides by
+# itself; without them Wine's built-in d3d12 is used and device creation fails
+# ("Invalid parameter"). Microsoft's d3dcompiler_47 too: see env.sh.
+klbf_compiler
+klbf_overrides
 export VICTORY_CACHE_DIR="$(winpath "$KLBF_HOME/cache")"
 export VICTORY_DATA_DIR="$(winpath "$KLBF_HOME/data")"
 # The built-in skip list holds a shader that hangs the AMD compiler only;
 # on other cards nothing is skipped unless VICTORY_SKIP_PIPELINES is set.
 export VICTORY_SKIP_PIPELINES="${VICTORY_SKIP_PIPELINES-}"
-WINE="$PROTON_DIR/files/bin/wine"
 LOG="$KLBF_HOME/logs/$(date +%Y%m%d-%H%M%S)-${1:-run}.log"
 
 case "$1" in

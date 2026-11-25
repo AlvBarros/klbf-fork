@@ -33,6 +33,8 @@ What vkd3d-proton reports on this card: shader model 6.6–6.8, mesh shaders, DX
 | Build on Linux | ✅ | `scripts/linux/build.sh` |
 | Starts under Proton, Direct3D 12 device created | ✅ | `scripts/linux/run.sh check` |
 | Wine/vkd3d-proton pipeline library (shader cache kept between runs) | ✅ | from KLBF Lab (gmankab, upstream VIctory#347) |
+| Runtime compute shaders (indirect clamp, card compare, FFX) | ✅ with Microsoft's `d3dcompiler_47.dll` | Wine's own compiler rejects them, and without the clamp every indirect draw is dropped; the scripts install Microsoft's DLL into the prefix (see below) |
+| Test suite under Proton (`scripts/linux/test.sh`) | ✅ 534 of 541 | the 7 left: 3 need `dxil.dll`; 2 start `cargo`/`git` inside Wine; vkd3d-proton accepts unsigned DXIL; Wine's `ws2_32` lacks `WSAConnectByList` |
 | In game | ⏳ not run yet | results will go here |
 
 What differs from KLBF Lab on this setup:
@@ -63,6 +65,17 @@ scripts/linux/run.sh play "/path/to/game/<the title's exe>" --console series-s
 The prefix, shader cache, saves and logs live in `~/.local/share/klbf-fork` (`KLBF_HOME` to change it); each run writes a log in `logs/`. `PROTON_DIR` picks another Proton (for example `Proton - Experimental` for a newer vkd3d-proton). `VICTORY_*` settings from [README.klbf.md](README.klbf.md#run) pass through, e.g. `VICTORY_LATE_WAIT=1 scripts/linux/run.sh play ...`.
 
 Plug the controller in before starting. With `--console series-s` the start screen stays black: press **A** (or **Enter** with the window focused).
+
+**Microsoft's `d3dcompiler_47.dll` is required.** The layer compiles a few compute shaders at run time with `D3DCompile`; Wine's built-in compiler rejects them (no `Load4`/`Interlocked*` on `RWByteAddressBuffer`) and ignores their `RootSignature`. The scripts install Microsoft's DLL into the prefix and prefer it: they take `KLBF_D3DCOMPILER=/path/to/d3dcompiler_47.dll`, or `~/.local/share/klbf-fork/d3dcompiler_47.dll`, or find one shipped with an installed Steam game. It cannot be included in this repository. Without it the scripts print a warning.
+
+## Test (Linux)
+
+```sh
+scripts/linux/test.sh                    # whole suite, built for Windows and run under Proton's wine
+scripts/linux/test.sh -p victory-gpu     # one crate (the Direct3D 12 tests run on the GPU through vkd3d-proton)
+```
+
+Plain `cargo test` cannot build the Windows-only crates on Linux; `test.sh` sets `scripts/linux/wine-runner.sh` as the runner for the Windows target only, so Windows machines still run tests natively.
 
 Note for anyone running Proton's `wine` by hand: it needs `WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11=n,b"`, or Wine's built-in Direct3D 12 is used and the device fails with "Invalid parameter". The launcher sets it.
 
